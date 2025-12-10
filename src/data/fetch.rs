@@ -55,4 +55,3 @@ pub async fn fetch_klines(symbol: &str, interval: &str, limit: u32) -> Result<Ve
     
     Ok(candles)
 }
-
