@@ -36,18 +36,31 @@ impl TradeTape {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let items: Vec<ListItem> = self
-            .trades
+        let trades_vec: Vec<_> = self.trades.iter().rev().take(inner.height as usize).collect();
+        let items: Vec<ListItem> = trades_vec
             .iter()
-            .rev()
-            .take(inner.height as usize)
-            .map(|trade| {
-                let color = if trade.is_buyer_maker {
-                    Color::Red
+            .enumerate()
+            .map(|(idx, trade)| {
+                let (color, direction) = if idx < trades_vec.len() - 1 {
+                    let prev_trade = trades_vec[idx + 1];
+                    if trade.price > prev_trade.price {
+                        (Color::Green, "↑")
+                    } else if trade.price < prev_trade.price {
+                        (Color::Red, "↓")
+                    } else {
+                        if !trade.is_buyer_maker {
+                            (Color::Green, "↑")
+                        } else {
+                            (Color::Red, "↓")
+                        }
+                    }
                 } else {
-                    Color::Green
+                    if !trade.is_buyer_maker {
+                        (Color::Green, "↑")
+                    } else {
+                        (Color::Red, "↓")
+                    }
                 };
-                let direction = if trade.is_buyer_maker { "↓" } else { "↑" };
                 let text = format!(
                     "{} {:>10.2} x {:>10.4}",
                     direction, trade.price, trade.quantity

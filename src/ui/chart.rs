@@ -58,19 +58,11 @@ impl Chart {
         self.zoom = (self.zoom / 2).max(1);
     }
 
-    pub fn pan_left(&mut self) {
-        let visible = self.get_visible_count();
-        if self.offset + visible < self.candles.len() {
-            self.offset += visible / 4;
-        }
-    }
-
-    pub fn pan_right(&mut self) {
-        self.offset = self.offset.saturating_sub(self.get_visible_count() / 4);
-    }
-
-    fn get_visible_count(&self) -> usize {
-        (100 / self.zoom).max(10)
+    fn get_visible_count(&self, available_width: usize) -> usize {
+        let min_candle_width = 2;
+        let max_candles = available_width / min_candle_width;
+        let zoom_based = (100 / self.zoom).max(10);
+        zoom_based.min(max_candles).max(10)
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
@@ -106,7 +98,10 @@ impl Chart {
             return;
         }
 
-        let visible_count = self.get_visible_count();
+        let chart_width = area.width.saturating_sub(13) as usize;
+        let chart_height = area.height.saturating_sub(2);
+        
+        let visible_count = self.get_visible_count(chart_width);
         let start_idx = self.candles.len().saturating_sub(visible_count + self.offset);
         let end_idx = self.candles.len().saturating_sub(self.offset);
         let visible_candles: Vec<&Candle> = self
@@ -145,19 +140,20 @@ impl Chart {
         );
 
         let price_range = (max_price - min_price).max(0.0001);
-        let chart_width = area.width.saturating_sub(13);
-        let chart_height = area.height.saturating_sub(2);
-        let candle_width = (chart_width as usize / parsed.len().max(1)).max(1);
+        let candle_count = parsed.len();
+        let spacing = chart_width / candle_count.max(1);
+        // let candle_width = spacing.max(1);
 
         let inner = Rect {
             x: area.x + 13,
             y: area.y + 1,
-            width: chart_width,
+            width: chart_width as u16,
             height: chart_height,
         };
 
         for (idx, (open, high, low, close, _vol)) in parsed.iter().enumerate() {
-            let x = inner.x + (idx * candle_width) as u16 + candle_width as u16 / 2;
+            let x_pos = (idx * spacing) + (spacing / 2);
+            let x = inner.x + x_pos.min(chart_width - 1) as u16;
 
             let high_y = inner.y
                 + ((max_price - high) / price_range * (chart_height - 1) as f64) as u16;
@@ -251,7 +247,8 @@ impl Chart {
             return;
         }
 
-        let visible_count = self.get_visible_count();
+        let chart_width = area.width.saturating_sub(13) as usize;
+        let visible_count = self.get_visible_count(chart_width);
         let start_idx = self.candles.len().saturating_sub(visible_count + self.offset);
         let end_idx = self.candles.len().saturating_sub(self.offset);
         let visible_candles: Vec<&Candle> = self
@@ -279,19 +276,20 @@ impl Chart {
             return;
         }
 
-        let chart_width = area.width.saturating_sub(13);
+        let chart_width = area.width.saturating_sub(13) as usize;
         let chart_height = area.height.saturating_sub(1);
-        let candle_width = (chart_width as usize / volumes.len().max(1)).max(1);
+        let spacing = chart_width / volumes.len().max(1);
 
         let inner = Rect {
             x: area.x + 13,
             y: area.y,
-            width: chart_width,
+            width: chart_width as u16,
             height: chart_height,
         };
 
         for (idx, volume) in volumes.iter().enumerate() {
-            let x = inner.x + (idx * candle_width) as u16 + candle_width as u16 / 2;
+            let x_pos = (idx * spacing) + (spacing / 2);
+            let x = inner.x + x_pos.min(chart_width - 1) as u16;
             let height = ((volume / max_volume) * chart_height as f64) as u16;
             
             if height > 0 {

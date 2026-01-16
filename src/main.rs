@@ -4,7 +4,7 @@ mod ui;
 use data::{fetch_klines, stream_klines};
 use data::orderbook::stream_orderbook;
 use data::trades::stream_trades;
-use ui::{Chart, LayoutManager};
+use ui::{Chart, LayoutManager, Timeframe};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -45,18 +45,25 @@ impl AppState {
         }
     }
 
-    async fn switch_interval(&mut self, interval: String) {
+    async fn switch_interval(&mut self, interval: String, limit: u32) {
         let chart_guard = self.chart.lock().await;
         let symbol = chart_guard.symbol.clone();
         drop(chart_guard);
 
-        if let Ok(initial_candles) = fetch_klines(&symbol, &interval, 200).await {
+        if let Ok(initial_candles) = fetch_klines(&symbol, &interval, limit).await {
             let mut chart_guard = self.chart.lock().await;
             chart_guard.interval = interval.clone();
             chart_guard.candles.clear();
+            chart_guard.offset = 0;
             chart_guard.update_candles(initial_candles);
             let _ = self.stream_restart_tx.send((symbol, interval)).await;
         }
+    }
+
+    async fn switch_timeframe(&mut self, timeframe: ui::Timeframe) {
+        let interval = timeframe.to_binance_interval().to_string();
+        let limit = timeframe.limit();
+        self.switch_interval(interval, limit).await;
     }
 }
 
@@ -69,9 +76,11 @@ async fn main() -> io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let symbol = "BTCUSDT".to_string();
-    let interval = "1m".to_string();
+    let timeframe = Timeframe::OneMonth;
+    let interval = timeframe.to_binance_interval().to_string();
+    let limit = timeframe.limit();
 
-    let initial_candles = fetch_klines(&symbol, &interval, 200).await.unwrap_or_default();
+    let initial_candles = fetch_klines(&symbol, &interval, limit).await.unwrap_or_default();
     
     let chart = Arc::new(Mutex::new(Chart::new(symbol.clone(), interval.clone())));
     chart.lock().await.update_candles(initial_candles);
@@ -170,11 +179,33 @@ async fn main() -> io::Result<()> {
                         KeyCode::Char('-') | KeyCode::Char('_') => {
                             app.chart.lock().await.zoom_out();
                         }
+                        KeyCode::Tab => {
+                            let mut layout = app.layout.lock().await;
+                            layout.timeframe.select_next();
+                            let tf = layout.timeframe.current();
+                            drop(layout);
+                            app.switch_timeframe(tf).await;
+                        }
+                        KeyCode::BackTab => {
+                            let mut layout = app.layout.lock().await;
+                            layout.timeframe.select_prev();
+                            let tf = layout.timeframe.current();
+                            drop(layout);
+                            app.switch_timeframe(tf).await;
+                        }
                         KeyCode::Left => {
-                            app.chart.lock().await.pan_left();
+                            let mut layout = app.layout.lock().await;
+                            layout.timeframe.select_prev();
+                            let tf = layout.timeframe.current();
+                            drop(layout);
+                            app.switch_timeframe(tf).await;
                         }
                         KeyCode::Right => {
-                            app.chart.lock().await.pan_right();
+                            let mut layout = app.layout.lock().await;
+                            layout.timeframe.select_next();
+                            let tf = layout.timeframe.current();
+                            drop(layout);
+                            app.switch_timeframe(tf).await;
                         }
                         KeyCode::Up => {
                             let mut layout = app.layout.lock().await;
@@ -193,18 +224,6 @@ async fn main() -> io::Result<()> {
                             let new_symbol = layout.watchlist[layout.selected_symbol].clone();
                             drop(layout);
                             app.switch_symbol(new_symbol.clone()).await;
-                        }
-                        KeyCode::Char('1') => {
-                            app.switch_interval("1m".to_string()).await;
-                        }
-                        KeyCode::Char('5') => {
-                            app.switch_interval("5m".to_string()).await;
-                        }
-                        KeyCode::Char('H') => {
-                            app.switch_interval("1h".to_string()).await;
-                        }
-                        KeyCode::Char('d') | KeyCode::Char('D') => {
-                            app.switch_interval("1d".to_string()).await;
                         }
                         _ => {}
                     }

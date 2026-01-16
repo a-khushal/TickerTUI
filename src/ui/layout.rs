@@ -1,4 +1,4 @@
-use crate::ui::{Chart, OrderBookPanel, TradeTape, StatusBar};
+use crate::ui::{Chart, OrderBookPanel, TradeTape, StatusBar, TimeframeSelector};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -13,6 +13,7 @@ pub struct LayoutManager {
     pub orderbook: OrderBookPanel,
     pub tradetape: TradeTape,
     pub statusbar: StatusBar,
+    pub timeframe: TimeframeSelector,
 }
 
 impl LayoutManager {
@@ -29,6 +30,7 @@ impl LayoutManager {
             orderbook: OrderBookPanel::new(),
             tradetape: TradeTape::new(),
             statusbar: StatusBar::new(),
+            timeframe: TimeframeSelector::new(),
         }
     }
 
@@ -41,11 +43,14 @@ impl LayoutManager {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
+                Constraint::Length(3),
                 Constraint::Min(10),
                 Constraint::Length(1),
             ])
             .split(area);
 
+        self.timeframe.render(frame, main_chunks[0]);
+        
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -53,7 +58,7 @@ impl LayoutManager {
                 Constraint::Min(40),
                 Constraint::Length(30),
             ])
-            .split(main_chunks[0]);
+            .split(main_chunks[1]);
 
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -68,7 +73,7 @@ impl LayoutManager {
         self.orderbook.render(frame, right_chunks[0]);
         self.tradetape.render(frame, right_chunks[1]);
         self.statusbar.symbol = chart.symbol.clone();
-        self.statusbar.render(frame, main_chunks[1]);
+        self.statusbar.render(frame, main_chunks[2]);
     }
 
     fn render_watchlist(&self, frame: &mut Frame, area: Rect, chart: &Chart) {
