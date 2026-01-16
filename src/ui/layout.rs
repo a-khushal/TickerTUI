@@ -1,4 +1,4 @@
-use crate::ui::Chart;
+use crate::ui::{Chart, OrderBookPanel, TradeTape, StatusBar};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -10,6 +10,9 @@ use ratatui::{
 pub struct LayoutManager {
     pub watchlist: Vec<String>,
     pub selected_symbol: usize,
+    pub orderbook: OrderBookPanel,
+    pub tradetape: TradeTape,
+    pub statusbar: StatusBar,
 }
 
 impl LayoutManager {
@@ -23,22 +26,49 @@ impl LayoutManager {
                 "ADAUSDT".to_string(),
             ],
             selected_symbol: 0,
+            orderbook: OrderBookPanel::new(),
+            tradetape: TradeTape::new(),
+            statusbar: StatusBar::new(),
         }
     }
 
     pub fn render(
-        &self,
+        &mut self,
         frame: &mut Frame,
         chart: &Chart,
         area: Rect,
     ) {
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(20), Constraint::Min(40)])
+        let main_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(10),
+                Constraint::Length(1),
+            ])
             .split(area);
 
-        self.render_watchlist(frame, chunks[0], chart);
-        chart.render(frame, chunks[1]);
+        let content_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(20),
+                Constraint::Min(40),
+                Constraint::Length(30),
+            ])
+            .split(main_chunks[0]);
+
+        let right_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Percentage(50),
+            ])
+            .split(content_chunks[2]);
+
+        self.render_watchlist(frame, content_chunks[0], chart);
+        chart.render(frame, content_chunks[1]);
+        self.orderbook.render(frame, right_chunks[0]);
+        self.tradetape.render(frame, right_chunks[1]);
+        self.statusbar.symbol = chart.symbol.clone();
+        self.statusbar.render(frame, main_chunks[1]);
     }
 
     fn render_watchlist(&self, frame: &mut Frame, area: Rect, chart: &Chart) {
@@ -68,11 +98,35 @@ impl LayoutManager {
                     Style::default().fg(Color::White)
                 };
 
-                let mut price_text = symbol.clone();
+                let price_text = symbol.clone();
                 if is_current && !chart.candles.is_empty() {
                     if let Some(last) = chart.candles.back() {
                         if let Ok(close) = last.close.parse::<f64>() {
-                            price_text = format!("{} {:.2}", symbol, close);
+                            let first_price = chart.candles.front()
+                                .and_then(|c| c.close.parse::<f64>().ok())
+                                .unwrap_or(close);
+                            let change = close - first_price;
+                            let change_pct = if first_price > 0.0 {
+                                (change / first_price) * 100.0
+                            } else {
+                                0.0
+                            };
+                            let change_color = if change >= 0.0 {
+                                Color::Green
+                            } else {
+                                Color::Red
+                            };
+                            let line = Line::from(vec![
+                                Span::styled(
+                                    format!("{} {:.2} ", symbol, close),
+                                    style,
+                                ),
+                                Span::styled(
+                                    format!("{:+.2}%", change_pct),
+                                    Style::default().fg(change_color),
+                                ),
+                            ]);
+                            return ListItem::new(line);
                         }
                     }
                 }

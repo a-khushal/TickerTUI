@@ -2,6 +2,8 @@ mod data;
 mod ui;
 
 use data::{fetch_klines, stream_klines};
+use data::orderbook::stream_orderbook;
+use data::trades::stream_trades;
 use ui::{Chart, LayoutManager};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -18,7 +20,7 @@ use tokio::sync::Mutex;
 
 struct AppState {
     chart: Arc<Mutex<Chart>>,
-    layout: LayoutManager,
+    layout: Arc<Mutex<LayoutManager>>,
     stream_restart_tx: tokio::sync::mpsc::Sender<(String, String)>,
     show_help: bool,
 }
@@ -76,11 +78,17 @@ async fn main() -> io::Result<()> {
 
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(10);
     let chart_clone = chart.clone();
+    let layout_clone = Arc::new(Mutex::new(LayoutManager::new()));
+    
+    let layout_for_orderbook = layout_clone.clone();
+    let layout_for_trades = layout_clone.clone();
     
     tokio::spawn(async move {
         let mut current_symbol = symbol.clone();
         let mut current_interval = interval.clone();
         let mut rx = stream_klines(&current_symbol, &current_interval).await;
+        let mut orderbook_rx = stream_orderbook(&current_symbol).await;
+        let mut trades_rx = stream_trades(&current_symbol).await;
         
         loop {
             tokio::select! {
@@ -95,12 +103,26 @@ async fn main() -> io::Result<()> {
                         rx = stream_klines(&current_symbol, &current_interval).await;
                     }
                 }
+                orderbook_opt = orderbook_rx.recv() => {
+                    if let Some(book) = orderbook_opt {
+                        let mut layout = layout_for_orderbook.lock().await;
+                        layout.orderbook.update(book);
+                    }
+                }
+                trade_opt = trades_rx.recv() => {
+                    if let Some(trade) = trade_opt {
+                        let mut layout = layout_for_trades.lock().await;
+                        layout.tradetape.add_trade(trade);
+                    }
+                }
                 restart_opt = restart_rx.recv() => {
                     if let Some((new_symbol, new_interval)) = restart_opt {
                         if new_symbol != current_symbol || new_interval != current_interval {
                             current_symbol = new_symbol;
                             current_interval = new_interval;
                             rx = stream_klines(&current_symbol, &current_interval).await;
+                            orderbook_rx = stream_orderbook(&current_symbol).await;
+                            trades_rx = stream_trades(&current_symbol).await;
                         }
                     }
                 }
@@ -110,21 +132,23 @@ async fn main() -> io::Result<()> {
 
     let mut app = AppState {
         chart,
-        layout: LayoutManager::new(),
+        layout: layout_clone,
         stream_restart_tx: restart_tx,
         show_help: false,
     };
 
     loop {
         let chart_guard = app.chart.lock().await;
+        let mut layout_guard = app.layout.lock().await;
         terminal.draw(|f| {
             if app.show_help {
                 render_help(f);
             } else {
-                app.layout.render(f, &chart_guard, f.area());
+                layout_guard.render(f, &chart_guard, f.area());
             }
         })?;
         drop(chart_guard);
+        drop(layout_guard);
 
         if event::poll(std::time::Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -153,17 +177,21 @@ async fn main() -> io::Result<()> {
                             app.chart.lock().await.pan_right();
                         }
                         KeyCode::Up => {
-                            if app.layout.selected_symbol > 0 {
-                                app.layout.selected_symbol -= 1;
+                            let mut layout = app.layout.lock().await;
+                            if layout.selected_symbol > 0 {
+                                layout.selected_symbol -= 1;
                             }
                         }
                         KeyCode::Down => {
-                            if app.layout.selected_symbol < app.layout.watchlist.len() - 1 {
-                                app.layout.selected_symbol += 1;
+                            let mut layout = app.layout.lock().await;
+                            if layout.selected_symbol < layout.watchlist.len() - 1 {
+                                layout.selected_symbol += 1;
                             }
                         }
                         KeyCode::Enter => {
-                            let new_symbol = app.layout.watchlist[app.layout.selected_symbol].clone();
+                            let layout = app.layout.lock().await;
+                            let new_symbol = layout.watchlist[layout.selected_symbol].clone();
+                            drop(layout);
                             app.switch_symbol(new_symbol.clone()).await;
                         }
                         KeyCode::Char('1') => {
