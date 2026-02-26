@@ -13,16 +13,56 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use ui::{Chart, LayoutManager, Timeframe};
+
+struct FetchResult {
+    request_id: u64,
+    symbol: String,
+    interval: String,
+    candles: Result<Vec<data::Candle>, String>,
+}
 
 struct AppState {
     chart: Arc<Mutex<Chart>>,
     layout: Arc<Mutex<LayoutManager>>,
     stream_restart_tx: tokio::sync::mpsc::Sender<(String, String)>,
+    fetch_result_tx: tokio::sync::mpsc::UnboundedSender<FetchResult>,
+    fetch_task: Option<JoinHandle<()>>,
+    next_request_id: u64,
+    pending_request_id: Option<u64>,
+    is_loading: bool,
     show_help: bool,
 }
 
 impl AppState {
+    fn queue_fetch(&mut self, symbol: String, interval: String, limit: u32) {
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        let request_id = self.next_request_id;
+        self.pending_request_id = Some(request_id);
+        self.is_loading = true;
+
+        if let Some(handle) = self.fetch_task.take() {
+            handle.abort();
+        }
+
+        let tx = self.fetch_result_tx.clone();
+        let handle = tokio::spawn(async move {
+            let candles = fetch_klines(&symbol, &interval, limit)
+                .await
+                .map_err(|e| e.to_string());
+
+            let _ = tx.send(FetchResult {
+                request_id,
+                symbol,
+                interval,
+                candles,
+            });
+        });
+
+        self.fetch_task = Some(handle);
+    }
+
     async fn switch_symbol(&mut self, symbol: String) {
         let chart_guard = self.chart.lock().await;
         let current_symbol = chart_guard.symbol.clone();
@@ -30,30 +70,18 @@ impl AppState {
         drop(chart_guard);
 
         if current_symbol != symbol {
-            if let Ok(initial_candles) = fetch_klines(&symbol, &interval, 200).await {
-                let mut chart_guard = self.chart.lock().await;
-                chart_guard.symbol = symbol.clone();
-                chart_guard.candles.clear();
-                chart_guard.offset = 0;
-                chart_guard.update_candles(initial_candles);
-                drop(chart_guard);
-                let _ = self.stream_restart_tx.send((symbol, interval)).await;
-            }
+            self.queue_fetch(symbol, interval, 200);
         }
     }
 
     async fn switch_interval(&mut self, interval: String, limit: u32) {
         let chart_guard = self.chart.lock().await;
         let symbol = chart_guard.symbol.clone();
+        let current_interval = chart_guard.interval.clone();
         drop(chart_guard);
 
-        if let Ok(initial_candles) = fetch_klines(&symbol, &interval, limit).await {
-            let mut chart_guard = self.chart.lock().await;
-            chart_guard.interval = interval.clone();
-            chart_guard.candles.clear();
-            chart_guard.offset = 0;
-            chart_guard.update_candles(initial_candles);
-            let _ = self.stream_restart_tx.send((symbol, interval)).await;
+        if current_interval != interval {
+            self.queue_fetch(symbol, interval, limit);
         }
     }
 
@@ -61,6 +89,35 @@ impl AppState {
         let interval = timeframe.to_binance_interval().to_string();
         let limit = timeframe.limit();
         self.switch_interval(interval, limit).await;
+    }
+
+    async fn apply_fetch_result(&mut self, result: FetchResult) {
+        if self.pending_request_id != Some(result.request_id) {
+            return;
+        }
+
+        self.pending_request_id = None;
+        self.fetch_task = None;
+        self.is_loading = false;
+
+        match result.candles {
+            Ok(initial_candles) => {
+                let mut chart_guard = self.chart.lock().await;
+                chart_guard.symbol = result.symbol.clone();
+                chart_guard.interval = result.interval.clone();
+                chart_guard.candles.clear();
+                chart_guard.offset = 0;
+                chart_guard.update_candles(initial_candles);
+                drop(chart_guard);
+                let _ = self
+                    .stream_restart_tx
+                    .send((result.symbol, result.interval))
+                    .await;
+            }
+            Err(err) => {
+                eprintln!("Kline fetch failed: {}", err);
+            }
+        }
     }
 }
 
@@ -85,6 +142,7 @@ async fn main() -> io::Result<()> {
     chart.lock().await.update_candles(initial_candles);
 
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(10);
+    let (fetch_result_tx, mut fetch_result_rx) = tokio::sync::mpsc::unbounded_channel();
     let chart_clone = chart.clone();
     let layout_clone = Arc::new(Mutex::new(LayoutManager::new()));
 
@@ -166,12 +224,22 @@ async fn main() -> io::Result<()> {
         chart,
         layout: layout_clone,
         stream_restart_tx: restart_tx,
+        fetch_result_tx,
+        fetch_task: None,
+        next_request_id: 0,
+        pending_request_id: None,
+        is_loading: false,
         show_help: false,
     };
 
     loop {
+        while let Ok(result) = fetch_result_rx.try_recv() {
+            app.apply_fetch_result(result).await;
+        }
+
         let chart_guard = app.chart.lock().await;
         let mut layout_guard = app.layout.lock().await;
+        layout_guard.statusbar.loading = app.is_loading;
         terminal.draw(|f| {
             if app.show_help {
                 render_help(f);

@@ -9,6 +9,7 @@ use ratatui::{
 pub struct StatusBar {
     pub connected: bool,
     pub symbol: String,
+    pub loading: bool,
 }
 
 impl StatusBar {
@@ -16,6 +17,7 @@ impl StatusBar {
         Self {
             connected: true,
             symbol: String::new(),
+            loading: false,
         }
     }
 
@@ -26,6 +28,12 @@ impl StatusBar {
             Color::Red
         };
         let status_text = if self.connected { "●" } else { "○" };
+        let mode_text = if self.loading { "LOADING" } else { "LIVE" };
+        let mode_color = if self.loading {
+            Color::Yellow
+        } else {
+            Color::Cyan
+        };
 
         let text = Line::from(vec![
             Span::styled(
@@ -33,6 +41,8 @@ impl StatusBar {
                 Style::default().fg(status_color),
             ),
             Span::styled("CONNECTED", Style::default().fg(Color::White)),
+            Span::raw(" | "),
+            Span::styled(mode_text, Style::default().fg(mode_color)),
             Span::raw(" | "),
             Span::styled("Q", Style::default().fg(Color::Yellow)),
             Span::raw(":Quit "),
