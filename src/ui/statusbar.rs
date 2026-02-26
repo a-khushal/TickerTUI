@@ -6,43 +6,50 @@ use ratatui::{
     Frame,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionMode {
+    Live,
+    Reconnecting,
+    Degraded,
+}
+
 pub struct StatusBar {
-    pub connected: bool,
+    pub connection_mode: ConnectionMode,
     pub symbol: String,
     pub loading: bool,
+    pub last_error: Option<String>,
 }
 
 impl StatusBar {
     pub fn new() -> Self {
         Self {
-            connected: true,
+            connection_mode: ConnectionMode::Live,
             symbol: String::new(),
             loading: false,
+            last_error: None,
         }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
-        let status_color = if self.connected {
-            Color::Green
-        } else {
-            Color::Red
+        let (status_text, status_color) = match self.connection_mode {
+            ConnectionMode::Live => ("LIVE", Color::Green),
+            ConnectionMode::Reconnecting => ("RECONNECTING", Color::Yellow),
+            ConnectionMode::Degraded => ("DEGRADED", Color::Red),
         };
-        let status_text = if self.connected { "●" } else { "○" };
-        let mode_text = if self.loading { "LOADING" } else { "LIVE" };
+
+        let mode_text = if self.loading { "LOADING" } else { "READY" };
         let mode_color = if self.loading {
             Color::Yellow
         } else {
             Color::Cyan
         };
 
-        let text = Line::from(vec![
-            Span::styled(
-                format!("{} ", status_text),
-                Style::default().fg(status_color),
-            ),
-            Span::styled("CONNECTED", Style::default().fg(Color::White)),
+        let mut spans = vec![
+            Span::styled(status_text, Style::default().fg(status_color)),
             Span::raw(" | "),
             Span::styled(mode_text, Style::default().fg(mode_color)),
+            Span::raw(" | "),
+            Span::styled(self.symbol.clone(), Style::default().fg(Color::White)),
             Span::raw(" | "),
             Span::styled("Q", Style::default().fg(Color::Yellow)),
             Span::raw(":Quit "),
@@ -58,8 +65,17 @@ impl StatusBar {
             Span::raw(":Select "),
             Span::styled("+/-", Style::default().fg(Color::Yellow)),
             Span::raw(":Zoom"),
-        ]);
+        ];
 
+        if let Some(err) = &self.last_error {
+            spans.push(Span::raw(" | "));
+            spans.push(Span::styled(
+                format!("ERR: {}", err),
+                Style::default().fg(Color::Red),
+            ));
+        }
+
+        let text = Line::from(spans);
         let para = Paragraph::new(text).block(Block::default());
         frame.render_widget(para, area);
     }

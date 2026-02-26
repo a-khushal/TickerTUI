@@ -9,6 +9,6 @@ pub mod tradetape;
 pub use chart::Chart;
 pub use layout::LayoutManager;
 pub use orderbook::OrderBookPanel;
-pub use statusbar::StatusBar;
+pub use statusbar::{ConnectionMode, StatusBar};
 pub use timeframe::{Timeframe, TimeframeSelector};
 pub use tradetape::TradeTape;

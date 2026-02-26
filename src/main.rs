@@ -12,9 +12,134 @@ use data::{fetch_klines, stream_klines};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use ui::{Chart, LayoutManager, Timeframe};
+use ui::{Chart, ConnectionMode, LayoutManager, Timeframe};
+
+const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+const FETCH_RETRIES: usize = 2;
+const FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
+const HEALTH_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeedState {
+    Live,
+    Reconnecting,
+    Degraded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HealthUpdate {
+    kline: FeedState,
+    orderbook: FeedState,
+    trades: FeedState,
+    last_error: Option<String>,
+}
+
+impl HealthUpdate {
+    fn overall_mode(&self) -> ConnectionMode {
+        if self.kline == FeedState::Live
+            && self.orderbook == FeedState::Live
+            && self.trades == FeedState::Live
+        {
+            ConnectionMode::Live
+        } else if self.kline == FeedState::Degraded
+            || self.orderbook == FeedState::Degraded
+            || self.trades == FeedState::Degraded
+        {
+            ConnectionMode::Degraded
+        } else {
+            ConnectionMode::Reconnecting
+        }
+    }
+}
+
+struct FeedTracker {
+    last_message: Option<Instant>,
+    state: FeedState,
+    reconnect_after: Duration,
+    degrade_after: Duration,
+}
+
+impl FeedTracker {
+    fn new(reconnect_after: Duration, degrade_after: Duration) -> Self {
+        Self {
+            last_message: None,
+            state: FeedState::Reconnecting,
+            reconnect_after,
+            degrade_after,
+        }
+    }
+
+    fn mark_live(&mut self, now: Instant) {
+        self.last_message = Some(now);
+        self.state = FeedState::Live;
+    }
+
+    fn mark_reconnecting(&mut self) {
+        self.last_message = None;
+        self.state = FeedState::Reconnecting;
+    }
+
+    fn refresh(&mut self, now: Instant) -> bool {
+        let previous = self.state;
+        if let Some(last) = self.last_message {
+            let elapsed = now.saturating_duration_since(last);
+            self.state = if elapsed >= self.degrade_after {
+                FeedState::Degraded
+            } else if elapsed >= self.reconnect_after {
+                FeedState::Reconnecting
+            } else {
+                FeedState::Live
+            };
+        } else {
+            self.state = FeedState::Reconnecting;
+        }
+
+        previous != self.state
+    }
+}
+
+fn health_reason(update: &HealthUpdate) -> Option<String> {
+    if update.overall_mode() == ConnectionMode::Live {
+        return None;
+    }
+
+    let mut degraded = Vec::new();
+    let mut reconnecting = Vec::new();
+
+    for (name, state) in [
+        ("kline", update.kline),
+        ("orderbook", update.orderbook),
+        ("trades", update.trades),
+    ] {
+        match state {
+            FeedState::Degraded => degraded.push(name),
+            FeedState::Reconnecting => reconnecting.push(name),
+            FeedState::Live => {}
+        }
+    }
+
+    if !degraded.is_empty() {
+        Some(format!("degraded: {}", degraded.join(",")))
+    } else if !reconnecting.is_empty() {
+        Some(format!("reconnecting: {}", reconnecting.join(",")))
+    } else {
+        None
+    }
+}
+
+fn push_health_update(
+    tx: &tokio::sync::mpsc::UnboundedSender<HealthUpdate>,
+    last_sent: &mut Option<HealthUpdate>,
+    next: &HealthUpdate,
+) {
+    if last_sent.as_ref() != Some(next) {
+        let _ = tx.send(next.clone());
+        *last_sent = Some(next.clone());
+    }
+}
 
 struct FetchResult {
     request_id: u64,
@@ -32,7 +157,41 @@ struct AppState {
     next_request_id: u64,
     pending_request_id: Option<u64>,
     is_loading: bool,
+    connection_mode: ConnectionMode,
+    connection_error: Option<String>,
     show_help: bool,
+}
+
+async fn fetch_klines_with_retry(
+    symbol: &str,
+    interval: &str,
+    limit: u32,
+) -> Result<Vec<data::Candle>, String> {
+    let mut last_error = String::from("unknown error");
+
+    for attempt in 1..=FETCH_RETRIES {
+        let fetch_result =
+            tokio::time::timeout(FETCH_TIMEOUT, fetch_klines(symbol, interval, limit)).await;
+
+        match fetch_result {
+            Ok(Ok(candles)) => return Ok(candles),
+            Ok(Err(err)) => {
+                last_error = format!("attempt {attempt}/{FETCH_RETRIES} failed: {err}");
+            }
+            Err(_) => {
+                last_error = format!(
+                    "attempt {attempt}/{FETCH_RETRIES} timed out after {}s",
+                    FETCH_TIMEOUT.as_secs()
+                );
+            }
+        }
+
+        if attempt < FETCH_RETRIES {
+            tokio::time::sleep(FETCH_RETRY_DELAY).await;
+        }
+    }
+
+    Err(last_error)
 }
 
 impl AppState {
@@ -48,9 +207,7 @@ impl AppState {
 
         let tx = self.fetch_result_tx.clone();
         let handle = tokio::spawn(async move {
-            let candles = fetch_klines(&symbol, &interval, limit)
-                .await
-                .map_err(|e| e.to_string());
+            let candles = fetch_klines_with_retry(&symbol, &interval, limit).await;
 
             let _ = tx.send(FetchResult {
                 request_id,
@@ -115,9 +272,15 @@ impl AppState {
                     .await;
             }
             Err(err) => {
+                self.connection_error = Some(format!("fetch: {}", err));
                 eprintln!("Kline fetch failed: {}", err);
             }
         }
+    }
+
+    fn apply_health_update(&mut self, update: HealthUpdate) {
+        self.connection_mode = update.overall_mode();
+        self.connection_error = update.last_error;
     }
 }
 
@@ -143,6 +306,7 @@ async fn main() -> io::Result<()> {
 
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(10);
     let (fetch_result_tx, mut fetch_result_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (health_tx, mut health_rx) = tokio::sync::mpsc::unbounded_channel();
     let chart_clone = chart.clone();
     let layout_clone = Arc::new(Mutex::new(LayoutManager::new()));
 
@@ -156,6 +320,23 @@ async fn main() -> io::Result<()> {
         let (mut orderbook_rx, mut orderbook_handle) = stream_orderbook(&current_symbol);
         let (mut trades_rx, mut trades_handle) = stream_trades(&current_symbol);
 
+        let mut kline_tracker = FeedTracker::new(Duration::from_secs(12), Duration::from_secs(40));
+        let mut orderbook_tracker =
+            FeedTracker::new(Duration::from_secs(3), Duration::from_secs(10));
+        let mut trades_tracker = FeedTracker::new(Duration::from_secs(3), Duration::from_secs(10));
+
+        let mut health = HealthUpdate {
+            kline: FeedState::Reconnecting,
+            orderbook: FeedState::Reconnecting,
+            trades: FeedState::Reconnecting,
+            last_error: Some("reconnecting: kline,orderbook,trades".to_string()),
+        };
+        let mut last_sent = None;
+        push_health_update(&health_tx, &mut last_sent, &health);
+
+        let mut health_tick = tokio::time::interval(HEALTH_TICK_INTERVAL);
+        health_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 candle_opt = rx.recv() => {
@@ -164,33 +345,63 @@ async fn main() -> io::Result<()> {
                         if chart.symbol == current_symbol {
                             chart.add_candle(candle);
                         }
+
+                        kline_tracker.mark_live(Instant::now());
+                        health.kline = kline_tracker.state;
+                        health.last_error = health_reason(&health);
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     } else {
                         kline_handle.abort();
                         let (new_rx, new_handle) = stream_klines(&current_symbol, &current_interval);
                         rx = new_rx;
                         kline_handle = new_handle;
+
+                        kline_tracker.mark_reconnecting();
+                        health.kline = kline_tracker.state;
+                        health.last_error = Some("kline stream dropped; reconnecting".to_string());
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     }
                 }
                 orderbook_opt = orderbook_rx.recv() => {
                     if let Some(book) = orderbook_opt {
                         let mut layout = layout_for_orderbook.lock().await;
                         layout.orderbook.update(book);
+
+                        orderbook_tracker.mark_live(Instant::now());
+                        health.orderbook = orderbook_tracker.state;
+                        health.last_error = health_reason(&health);
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     } else {
                         orderbook_handle.abort();
                         let (new_rx, new_handle) = stream_orderbook(&current_symbol);
                         orderbook_rx = new_rx;
                         orderbook_handle = new_handle;
+
+                        orderbook_tracker.mark_reconnecting();
+                        health.orderbook = orderbook_tracker.state;
+                        health.last_error = Some("orderbook stream dropped; reconnecting".to_string());
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     }
                 }
                 trade_opt = trades_rx.recv() => {
                     if let Some(trade) = trade_opt {
                         let mut layout = layout_for_trades.lock().await;
                         layout.tradetape.add_trade(trade);
+
+                        trades_tracker.mark_live(Instant::now());
+                        health.trades = trades_tracker.state;
+                        health.last_error = health_reason(&health);
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     } else {
                         trades_handle.abort();
                         let (new_rx, new_handle) = stream_trades(&current_symbol);
                         trades_rx = new_rx;
                         trades_handle = new_handle;
+
+                        trades_tracker.mark_reconnecting();
+                        health.trades = trades_tracker.state;
+                        health.last_error = Some("trade stream dropped; reconnecting".to_string());
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     }
                 }
                 restart_opt = restart_rx.recv() => {
@@ -213,7 +424,31 @@ async fn main() -> io::Result<()> {
                             kline_handle = new_kline_handle;
                             orderbook_handle = new_orderbook_handle;
                             trades_handle = new_trades_handle;
+
+                            kline_tracker.mark_reconnecting();
+                            orderbook_tracker.mark_reconnecting();
+                            trades_tracker.mark_reconnecting();
+                            health.kline = kline_tracker.state;
+                            health.orderbook = orderbook_tracker.state;
+                            health.trades = trades_tracker.state;
+                            health.last_error = Some("reconnecting: kline,orderbook,trades".to_string());
+                            push_health_update(&health_tx, &mut last_sent, &health);
                         }
+                    }
+                }
+                _ = health_tick.tick() => {
+                    let now = Instant::now();
+                    let mut changed = false;
+                    changed |= kline_tracker.refresh(now);
+                    changed |= orderbook_tracker.refresh(now);
+                    changed |= trades_tracker.refresh(now);
+
+                    if changed {
+                        health.kline = kline_tracker.state;
+                        health.orderbook = orderbook_tracker.state;
+                        health.trades = trades_tracker.state;
+                        health.last_error = health_reason(&health);
+                        push_health_update(&health_tx, &mut last_sent, &health);
                     }
                 }
             }
@@ -229,6 +464,8 @@ async fn main() -> io::Result<()> {
         next_request_id: 0,
         pending_request_id: None,
         is_loading: false,
+        connection_mode: ConnectionMode::Reconnecting,
+        connection_error: Some("reconnecting: kline,orderbook,trades".to_string()),
         show_help: false,
     };
 
@@ -237,9 +474,15 @@ async fn main() -> io::Result<()> {
             app.apply_fetch_result(result).await;
         }
 
+        while let Ok(update) = health_rx.try_recv() {
+            app.apply_health_update(update);
+        }
+
         let chart_guard = app.chart.lock().await;
         let mut layout_guard = app.layout.lock().await;
         layout_guard.statusbar.loading = app.is_loading;
+        layout_guard.statusbar.connection_mode = app.connection_mode;
+        layout_guard.statusbar.last_error = app.connection_error.clone();
         terminal.draw(|f| {
             if app.show_help {
                 render_help(f);
