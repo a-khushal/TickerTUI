@@ -47,5 +47,9 @@ cargo run
 - `Tab/Shift+Tab` - Switch timeframes
 - `Enter` - Select symbol
 - `+/-` - Zoom in/out
+- `S` - Toggle SMA20 overlay
+- `R` - Toggle RSI14 overlay
 - `?` - Help
 - `q` - Quit
+
+Settings are auto-saved to `.tickertui.json` (watchlist, selected symbol, timeframe, and zoom).

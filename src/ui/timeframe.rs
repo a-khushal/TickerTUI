@@ -5,8 +5,9 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
     Frame,
 };
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Timeframe {
     OneDay,
     SevenDays,
@@ -39,7 +40,7 @@ impl Timeframe {
         }
     }
 
-    pub fn to_binance_interval(&self) -> &'static str {
+    pub fn binance_interval(self) -> &'static str {
         match self {
             Timeframe::OneDay => "5m",
             Timeframe::SevenDays => "15m",
@@ -77,6 +78,18 @@ impl TimeframeSelector {
 
     pub fn current(&self) -> Timeframe {
         self.timeframes[self.selected]
+    }
+
+    pub fn from_timeframe(timeframe: Timeframe) -> Self {
+        let mut selector = Self::new();
+        selector.set_current(timeframe);
+        selector
+    }
+
+    pub fn set_current(&mut self, timeframe: Timeframe) {
+        if let Some(position) = self.timeframes.iter().position(|tf| *tf == timeframe) {
+            self.selected = position;
+        }
     }
 
     pub fn select_next(&mut self) {

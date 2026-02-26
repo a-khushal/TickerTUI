@@ -1,21 +1,26 @@
+mod config;
 mod data;
 mod ui;
 
+use config::{config_path, load_config, save_config, AppConfig};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use data::orderbook::stream_orderbook;
+use data::prices::stream_watchlist_prices;
 use data::trades::stream_trades;
 use data::{fetch_klines, stream_klines};
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
-use ui::{Chart, ConnectionMode, LayoutManager, Timeframe};
+use ui::{Chart, ConnectionMode, LayoutManager};
 
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const FETCH_RETRIES: usize = 2;
@@ -141,6 +146,19 @@ fn push_health_update(
     }
 }
 
+fn should_apply_fetch_result(pending_request_id: Option<u64>, incoming_request_id: u64) -> bool {
+    pending_request_id == Some(incoming_request_id)
+}
+
+fn should_restart_stream(
+    current_symbol: &str,
+    current_interval: &str,
+    new_symbol: &str,
+    new_interval: &str,
+) -> bool {
+    current_symbol != new_symbol || current_interval != new_interval
+}
+
 struct FetchResult {
     request_id: u64,
     symbol: String,
@@ -151,6 +169,7 @@ struct FetchResult {
 struct AppState {
     chart: Arc<Mutex<Chart>>,
     layout: Arc<Mutex<LayoutManager>>,
+    config_path: PathBuf,
     stream_restart_tx: tokio::sync::mpsc::Sender<(String, String)>,
     fetch_result_tx: tokio::sync::mpsc::UnboundedSender<FetchResult>,
     fetch_task: Option<JoinHandle<()>>,
@@ -195,6 +214,26 @@ async fn fetch_klines_with_retry(
 }
 
 impl AppState {
+    async fn snapshot_config(&self) -> AppConfig {
+        let chart_guard = self.chart.lock().await;
+        let layout_guard = self.layout.lock().await;
+        AppConfig {
+            watchlist: layout_guard.watchlist.clone(),
+            selected_symbol: layout_guard.selected_symbol,
+            symbol: chart_guard.symbol.clone(),
+            timeframe: layout_guard.timeframe.current(),
+            zoom: chart_guard.zoom,
+        }
+        .sanitized()
+    }
+
+    async fn persist_config(&self) {
+        let config = self.snapshot_config().await;
+        if let Err(err) = save_config(&self.config_path, &config) {
+            eprintln!("Failed to save config: {}", err);
+        }
+    }
+
     fn queue_fetch(&mut self, symbol: String, interval: String, limit: u32) {
         self.next_request_id = self.next_request_id.wrapping_add(1);
         let request_id = self.next_request_id;
@@ -226,8 +265,13 @@ impl AppState {
         let interval = chart_guard.interval.clone();
         drop(chart_guard);
 
+        let limit = {
+            let layout_guard = self.layout.lock().await;
+            layout_guard.timeframe.current().limit()
+        };
+
         if current_symbol != symbol {
-            self.queue_fetch(symbol, interval, 200);
+            self.queue_fetch(symbol, interval, limit);
         }
     }
 
@@ -243,13 +287,13 @@ impl AppState {
     }
 
     async fn switch_timeframe(&mut self, timeframe: ui::Timeframe) {
-        let interval = timeframe.to_binance_interval().to_string();
+        let interval = timeframe.binance_interval().to_string();
         let limit = timeframe.limit();
         self.switch_interval(interval, limit).await;
     }
 
     async fn apply_fetch_result(&mut self, result: FetchResult) {
-        if self.pending_request_id != Some(result.request_id) {
+        if !should_apply_fetch_result(self.pending_request_id, result.request_id) {
             return;
         }
 
@@ -270,6 +314,7 @@ impl AppState {
                     .stream_restart_tx
                     .send((result.symbol, result.interval))
                     .await;
+                self.persist_config().await;
             }
             Err(err) => {
                 self.connection_error = Some(format!("fetch: {}", err));
@@ -286,15 +331,23 @@ impl AppState {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        eprintln!("TickerTUI needs an interactive terminal (TTY). Run it in a normal shell.");
+        return Ok(());
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let symbol = "BTCUSDT".to_string();
-    let timeframe = Timeframe::OneMonth;
-    let interval = timeframe.to_binance_interval().to_string();
+    let config_path = config_path();
+    let initial_config = load_config(&config_path).sanitized();
+
+    let symbol = initial_config.symbol.clone();
+    let timeframe = initial_config.timeframe;
+    let interval = timeframe.binance_interval().to_string();
     let limit = timeframe.limit();
 
     let initial_candles = fetch_klines(&symbol, &interval, limit)
@@ -302,16 +355,26 @@ async fn main() -> io::Result<()> {
         .unwrap_or_default();
 
     let chart = Arc::new(Mutex::new(Chart::new(symbol.clone(), interval.clone())));
-    chart.lock().await.update_candles(initial_candles);
+    {
+        let mut chart_guard = chart.lock().await;
+        chart_guard.zoom = initial_config.zoom;
+        chart_guard.update_candles(initial_candles);
+    }
 
-    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(10);
+    let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel::<(String, String)>(10);
     let (fetch_result_tx, mut fetch_result_rx) = tokio::sync::mpsc::unbounded_channel();
     let (health_tx, mut health_rx) = tokio::sync::mpsc::unbounded_channel();
     let chart_clone = chart.clone();
-    let layout_clone = Arc::new(Mutex::new(LayoutManager::new()));
+    let layout_clone = Arc::new(Mutex::new(LayoutManager::new(
+        initial_config.watchlist.clone(),
+        initial_config.selected_symbol,
+        timeframe,
+    )));
 
     let layout_for_orderbook = layout_clone.clone();
     let layout_for_trades = layout_clone.clone();
+    let layout_for_prices = layout_clone.clone();
+    let watchlist_for_prices = initial_config.watchlist.clone();
 
     tokio::spawn(async move {
         let mut current_symbol = symbol.clone();
@@ -319,6 +382,8 @@ async fn main() -> io::Result<()> {
         let (mut rx, mut kline_handle) = stream_klines(&current_symbol, &current_interval);
         let (mut orderbook_rx, mut orderbook_handle) = stream_orderbook(&current_symbol);
         let (mut trades_rx, mut trades_handle) = stream_trades(&current_symbol);
+        let (mut watch_prices_rx, mut watch_prices_handle) =
+            stream_watchlist_prices(&watchlist_for_prices);
 
         let mut kline_tracker = FeedTracker::new(Duration::from_secs(12), Duration::from_secs(40));
         let mut orderbook_tracker =
@@ -404,9 +469,25 @@ async fn main() -> io::Result<()> {
                         push_health_update(&health_tx, &mut last_sent, &health);
                     }
                 }
+                watch_price_opt = watch_prices_rx.recv() => {
+                    if let Some(watch_price) = watch_price_opt {
+                        let mut layout = layout_for_prices.lock().await;
+                        layout.update_watch_price(watch_price);
+                    } else {
+                        watch_prices_handle.abort();
+                        let (new_rx, new_handle) = stream_watchlist_prices(&watchlist_for_prices);
+                        watch_prices_rx = new_rx;
+                        watch_prices_handle = new_handle;
+                    }
+                }
                 restart_opt = restart_rx.recv() => {
                     if let Some((new_symbol, new_interval)) = restart_opt {
-                        if new_symbol != current_symbol || new_interval != current_interval {
+                        if should_restart_stream(
+                            &current_symbol,
+                            &current_interval,
+                            &new_symbol,
+                            &new_interval,
+                        ) {
                             current_symbol = new_symbol;
                             current_interval = new_interval;
 
@@ -458,6 +539,7 @@ async fn main() -> io::Result<()> {
     let mut app = AppState {
         chart,
         layout: layout_clone,
+        config_path,
         stream_restart_tx: restart_tx,
         fetch_result_tx,
         fetch_task: None,
@@ -501,6 +583,7 @@ async fn main() -> io::Result<()> {
                             if app.show_help {
                                 app.show_help = false;
                             } else {
+                                app.persist_config().await;
                                 break;
                             }
                         }
@@ -509,9 +592,11 @@ async fn main() -> io::Result<()> {
                         }
                         KeyCode::Char('+') | KeyCode::Char('=') => {
                             app.chart.lock().await.zoom_in();
+                            app.persist_config().await;
                         }
                         KeyCode::Char('-') | KeyCode::Char('_') => {
                             app.chart.lock().await.zoom_out();
+                            app.persist_config().await;
                         }
                         KeyCode::Tab => {
                             let mut layout = app.layout.lock().await;
@@ -519,6 +604,7 @@ async fn main() -> io::Result<()> {
                             let tf = layout.timeframe.current();
                             drop(layout);
                             app.switch_timeframe(tf).await;
+                            app.persist_config().await;
                         }
                         KeyCode::BackTab => {
                             let mut layout = app.layout.lock().await;
@@ -526,6 +612,13 @@ async fn main() -> io::Result<()> {
                             let tf = layout.timeframe.current();
                             drop(layout);
                             app.switch_timeframe(tf).await;
+                            app.persist_config().await;
+                        }
+                        KeyCode::Char('s') | KeyCode::Char('S') => {
+                            app.chart.lock().await.toggle_sma();
+                        }
+                        KeyCode::Char('r') | KeyCode::Char('R') => {
+                            app.chart.lock().await.toggle_rsi();
                         }
                         KeyCode::Left => {
                             app.chart.lock().await.pan_left();
@@ -538,12 +631,16 @@ async fn main() -> io::Result<()> {
                             if layout.selected_symbol > 0 {
                                 layout.selected_symbol -= 1;
                             }
+                            drop(layout);
+                            app.persist_config().await;
                         }
                         KeyCode::Down => {
                             let mut layout = app.layout.lock().await;
-                            if layout.selected_symbol < layout.watchlist.len() - 1 {
+                            if layout.selected_symbol < layout.watchlist.len().saturating_sub(1) {
                                 layout.selected_symbol += 1;
                             }
+                            drop(layout);
+                            app.persist_config().await;
                         }
                         KeyCode::Enter => {
                             let layout = app.layout.lock().await;
@@ -631,6 +728,21 @@ fn render_help(frame: &mut ratatui::Frame) {
         ]),
         Line::from(""),
         Line::from(vec![Span::styled(
+            "Indicators:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::raw("  S      "),
+            Span::styled("Toggle SMA20 overlay", Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::raw("  R      "),
+            Span::styled("Toggle RSI14 overlay", Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
             "Other:",
             Style::default()
                 .fg(Color::Yellow)
@@ -656,4 +768,38 @@ fn render_help(frame: &mut ratatui::Frame) {
         .alignment(Alignment::Left);
 
     frame.render_widget(paragraph, frame.area());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restart_stream_only_when_target_changes() {
+        assert!(!should_restart_stream("BTCUSDT", "1h", "BTCUSDT", "1h"));
+        assert!(should_restart_stream("BTCUSDT", "1h", "ETHUSDT", "1h"));
+        assert!(should_restart_stream("BTCUSDT", "1h", "BTCUSDT", "4h"));
+    }
+
+    #[test]
+    fn stale_fetch_results_are_rejected() {
+        assert!(should_apply_fetch_result(Some(7), 7));
+        assert!(!should_apply_fetch_result(Some(7), 6));
+        assert!(!should_apply_fetch_result(None, 1));
+    }
+
+    #[test]
+    fn feed_tracker_transitions_live_reconnecting_degraded() {
+        let now = Instant::now();
+        let mut tracker = FeedTracker::new(Duration::from_secs(2), Duration::from_secs(5));
+
+        tracker.mark_live(now);
+        assert_eq!(tracker.state, FeedState::Live);
+
+        tracker.refresh(now + Duration::from_secs(3));
+        assert_eq!(tracker.state, FeedState::Reconnecting);
+
+        tracker.refresh(now + Duration::from_secs(6));
+        assert_eq!(tracker.state, FeedState::Degraded);
+    }
 }

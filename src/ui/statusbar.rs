@@ -64,7 +64,11 @@ impl StatusBar {
             Span::styled("Enter", Style::default().fg(Color::Yellow)),
             Span::raw(":Select "),
             Span::styled("+/-", Style::default().fg(Color::Yellow)),
-            Span::raw(":Zoom"),
+            Span::raw(":Zoom "),
+            Span::styled("S", Style::default().fg(Color::Yellow)),
+            Span::raw(":SMA "),
+            Span::styled("R", Style::default().fg(Color::Yellow)),
+            Span::raw(":RSI"),
         ];
 
         if let Some(err) = &self.last_error {

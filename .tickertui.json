@@ -1,0 +1,13 @@
+{
+  "watchlist": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "BNBUSDT",
+    "SOLUSDT",
+    "ADAUSDT"
+  ],
+  "selected_symbol": 0,
+  "symbol": "BTCUSDT",
+  "timeframe": "YearToDate",
+  "zoom": 1
+}

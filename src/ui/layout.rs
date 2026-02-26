@@ -1,4 +1,5 @@
-use crate::ui::{Chart, OrderBookPanel, StatusBar, TimeframeSelector, TradeTape};
+use crate::data::WatchPrice;
+use crate::ui::{Chart, OrderBookPanel, StatusBar, Timeframe, TimeframeSelector, TradeTape};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -6,10 +7,12 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem},
     Frame,
 };
+use std::collections::HashMap;
 
 pub struct LayoutManager {
     pub watchlist: Vec<String>,
     pub selected_symbol: usize,
+    pub watch_prices: HashMap<String, WatchPrice>,
     pub orderbook: OrderBookPanel,
     pub tradetape: TradeTape,
     pub statusbar: StatusBar,
@@ -17,21 +20,21 @@ pub struct LayoutManager {
 }
 
 impl LayoutManager {
-    pub fn new() -> Self {
+    pub fn new(watchlist: Vec<String>, selected_symbol: usize, timeframe: Timeframe) -> Self {
+        let selected_symbol = selected_symbol.min(watchlist.len().saturating_sub(1));
         Self {
-            watchlist: vec![
-                "BTCUSDT".to_string(),
-                "ETHUSDT".to_string(),
-                "BNBUSDT".to_string(),
-                "SOLUSDT".to_string(),
-                "ADAUSDT".to_string(),
-            ],
-            selected_symbol: 0,
+            watchlist,
+            selected_symbol,
+            watch_prices: HashMap::new(),
             orderbook: OrderBookPanel::new(),
             tradetape: TradeTape::new(),
             statusbar: StatusBar::new(),
-            timeframe: TimeframeSelector::new(),
+            timeframe: TimeframeSelector::from_timeframe(timeframe),
         }
+    }
+
+    pub fn update_watch_price(&mut self, price: WatchPrice) {
+        self.watch_prices.insert(price.symbol.clone(), price);
     }
 
     pub fn render(&mut self, frame: &mut Frame, chart: &Chart, area: Rect) {
@@ -97,39 +100,38 @@ impl LayoutManager {
                     Style::default().fg(Color::White)
                 };
 
-                let price_text = symbol.clone();
+                if let Some(price) = self.watch_prices.get(symbol) {
+                    let change_color = if price.change_pct >= 0.0 {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(format!("{} {:.2} ", symbol, price.last_price), style),
+                        Span::styled(
+                            format!("{:+.2}%", price.change_pct),
+                            Style::default().fg(change_color),
+                        ),
+                    ]);
+                    return ListItem::new(line);
+                }
+
                 if is_current && !chart.candles.is_empty() {
                     if let Some(last) = chart.candles.back() {
                         if let Ok(close) = last.close.parse::<f64>() {
-                            let first_price = chart
-                                .candles
-                                .front()
-                                .and_then(|c| c.close.parse::<f64>().ok())
-                                .unwrap_or(close);
-                            let change = close - first_price;
-                            let change_pct = if first_price > 0.0 {
-                                (change / first_price) * 100.0
-                            } else {
-                                0.0
-                            };
-                            let change_color = if change >= 0.0 {
-                                Color::Green
-                            } else {
-                                Color::Red
-                            };
                             let line = Line::from(vec![
-                                Span::styled(format!("{} {:.2} ", symbol, close), style),
-                                Span::styled(
-                                    format!("{:+.2}%", change_pct),
-                                    Style::default().fg(change_color),
-                                ),
+                                Span::styled(format!("{} {:.2}", symbol, close), style),
+                                Span::styled(" ...", Style::default().fg(Color::Gray)),
                             ]);
                             return ListItem::new(line);
                         }
                     }
                 }
 
-                ListItem::new(Line::from(Span::styled(price_text, style)))
+                ListItem::new(Line::from(vec![
+                    Span::styled(symbol.clone(), style),
+                    Span::styled(" ...", Style::default().fg(Color::Gray)),
+                ]))
             })
             .collect();
 

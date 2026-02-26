@@ -2,6 +2,10 @@ use crate::data::Candle;
 
 #[allow(dead_code)]
 pub fn calculate_sma(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
+    if period == 0 {
+        return vec![None; candles.len()];
+    }
+
     if candles.len() < period {
         return vec![None; candles.len()];
     }
@@ -9,7 +13,8 @@ pub fn calculate_sma(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
     let mut sma = vec![None; period - 1];
 
     for i in (period - 1)..candles.len() {
-        let sum: f64 = candles[(i - period + 1)..=i]
+        let start = i + 1 - period;
+        let sum: f64 = candles[start..=i]
             .iter()
             .filter_map(|c| c.close.parse::<f64>().ok())
             .sum();
@@ -21,6 +26,10 @@ pub fn calculate_sma(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
 
 #[allow(dead_code)]
 pub fn calculate_rsi(candles: &[Candle], period: usize) -> Vec<Option<f64>> {
+    if period == 0 {
+        return vec![None; candles.len()];
+    }
+
     if candles.len() < period + 1 {
         return vec![None; candles.len()];
     }

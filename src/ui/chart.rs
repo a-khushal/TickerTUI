@@ -1,4 +1,5 @@
 use crate::data::Candle;
+use crate::ui::indicators::{calculate_rsi, calculate_sma};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -16,6 +17,8 @@ pub struct Chart {
     pub zoom: usize,
     pub offset: usize,
     pub max_candles: usize,
+    pub show_sma: bool,
+    pub show_rsi: bool,
 }
 
 impl Chart {
@@ -27,6 +30,8 @@ impl Chart {
             zoom: 1,
             offset: 0,
             max_candles: 200,
+            show_sma: false,
+            show_rsi: false,
         }
     }
 
@@ -67,6 +72,14 @@ impl Chart {
         self.offset = self.offset.saturating_sub(1);
     }
 
+    pub fn toggle_sma(&mut self) {
+        self.show_sma = !self.show_sma;
+    }
+
+    pub fn toggle_rsi(&mut self) {
+        self.show_rsi = !self.show_rsi;
+    }
+
     fn get_visible_count(&self, available_width: usize) -> usize {
         let min_candle_width = 2;
         let max_candles = available_width / min_candle_width;
@@ -100,6 +113,30 @@ impl Chart {
 
         let stats_area = vertical[3];
         self.render_stats(frame, stats_area);
+    }
+
+    fn clamp_x(inner: Rect, chart_width: usize, x_pos: usize) -> u16 {
+        let max_x = inner.x.saturating_add(inner.width.saturating_sub(1));
+        let x_offset = x_pos.min(chart_width.saturating_sub(1)) as u16;
+        inner.x.saturating_add(x_offset).min(max_x)
+    }
+
+    fn map_price_to_y(inner: Rect, max_price: f64, price_range: f64, value: f64) -> Option<u16> {
+        if inner.height == 0
+            || !max_price.is_finite()
+            || !price_range.is_finite()
+            || price_range <= 0.0
+        {
+            return None;
+        }
+        if !value.is_finite() {
+            return None;
+        }
+
+        let normalized = ((max_price - value) / price_range).clamp(0.0, 1.0);
+        let y_offset = (normalized * f64::from(inner.height.saturating_sub(1))).round() as u16;
+        let max_y = inner.y.saturating_add(inner.height.saturating_sub(1));
+        Some(inner.y.saturating_add(y_offset).min(max_y))
     }
 
     fn render_candlesticks(&self, frame: &mut Frame, area: Rect) {
@@ -155,7 +192,6 @@ impl Chart {
         let price_range = (max_price - min_price).max(0.0001);
         let candle_count = parsed.len();
         let spacing = chart_width / candle_count.max(1);
-        // let candle_width = spacing.max(1);
 
         let inner = Rect {
             x: area.x + 13,
@@ -166,16 +202,20 @@ impl Chart {
 
         for (idx, (open, high, low, close, _vol)) in parsed.iter().enumerate() {
             let x_pos = (idx * spacing) + (spacing / 2);
-            let x = inner.x + x_pos.min(chart_width - 1) as u16;
+            let x = Self::clamp_x(inner, chart_width, x_pos);
 
-            let high_y =
-                inner.y + ((max_price - high) / price_range * (chart_height - 1) as f64) as u16;
-            let low_y =
-                inner.y + ((max_price - low) / price_range * (chart_height - 1) as f64) as u16;
-            let open_y =
-                inner.y + ((max_price - open) / price_range * (chart_height - 1) as f64) as u16;
-            let close_y =
-                inner.y + ((max_price - close) / price_range * (chart_height - 1) as f64) as u16;
+            let Some(high_y) = Self::map_price_to_y(inner, max_price, price_range, *high) else {
+                continue;
+            };
+            let Some(low_y) = Self::map_price_to_y(inner, max_price, price_range, *low) else {
+                continue;
+            };
+            let Some(open_y) = Self::map_price_to_y(inner, max_price, price_range, *open) else {
+                continue;
+            };
+            let Some(close_y) = Self::map_price_to_y(inner, max_price, price_range, *close) else {
+                continue;
+            };
 
             let is_bullish = close >= open;
             let color = if is_bullish { Color::Green } else { Color::Red };
@@ -200,6 +240,35 @@ impl Chart {
                     }
                 }
             }
+        }
+
+        let full_candles: Vec<Candle> = self.candles.iter().cloned().collect();
+        if self.show_sma {
+            let sma_values = calculate_sma(&full_candles, 20);
+            self.draw_sma_overlay(
+                frame,
+                inner,
+                start_idx,
+                candle_count,
+                spacing,
+                chart_width,
+                max_price,
+                price_range,
+                &sma_values,
+            );
+        }
+
+        if self.show_rsi {
+            let rsi_values = calculate_rsi(&full_candles, 14);
+            self.draw_rsi_overlay(
+                frame,
+                inner,
+                start_idx,
+                candle_count,
+                spacing,
+                chart_width,
+                &rsi_values,
+            );
         }
 
         let label_count = 5.min(chart_height as usize / 2);
@@ -248,7 +317,7 @@ impl Chart {
             price_para,
             Rect {
                 x: area.x + 13,
-                y: area.y + area.height - 1,
+                y: area.y.saturating_add(area.height.saturating_sub(1)),
                 width: area.width.saturating_sub(13),
                 height: 1,
             },
@@ -310,7 +379,7 @@ impl Chart {
 
         for (idx, volume) in volumes.iter().enumerate() {
             let x_pos = (idx * spacing) + (spacing / 2);
-            let x = inner.x + x_pos.min(chart_width - 1) as u16;
+            let x = Self::clamp_x(inner, chart_width, x_pos);
             let height = ((volume / max_volume) * chart_height as f64) as u16;
 
             if height > 0 {
@@ -362,6 +431,14 @@ impl Chart {
             Color::Red
         };
 
+        let (latest_sma, latest_rsi) = self.latest_indicator_values();
+        let sma_value_text = latest_sma
+            .map(|value| format!("{:.2}", value))
+            .unwrap_or_else(|| "n/a".to_string());
+        let rsi_value_text = latest_rsi
+            .map(|value| format!("{:.1}", value))
+            .unwrap_or_else(|| "n/a".to_string());
+
         let stats_text = Line::from(vec![
             Span::styled("O: ", Style::default().fg(Color::Gray)),
             Span::styled(format!("{:.2}  ", open), Style::default().fg(Color::White)),
@@ -383,6 +460,32 @@ impl Chart {
                     .fg(change_color)
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::styled("  SMA20: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if self.show_sma {
+                    sma_value_text
+                } else {
+                    "off".to_string()
+                },
+                Style::default().fg(if self.show_sma {
+                    Color::Cyan
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+            Span::styled("  RSI14: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                if self.show_rsi {
+                    rsi_value_text
+                } else {
+                    "off".to_string()
+                },
+                Style::default().fg(if self.show_rsi {
+                    Color::Magenta
+                } else {
+                    Color::DarkGray
+                }),
+            ),
         ]);
 
         let stats_block = Block::default()
@@ -390,5 +493,80 @@ impl Chart {
             .border_style(Style::default().fg(Color::Blue));
         let stats_para = Paragraph::new(stats_text).block(stats_block);
         frame.render_widget(stats_para, area);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_sma_overlay(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        start_idx: usize,
+        candle_count: usize,
+        spacing: usize,
+        chart_width: usize,
+        max_price: f64,
+        price_range: f64,
+        sma_values: &[Option<f64>],
+    ) {
+        for idx in 0..candle_count {
+            let global_idx = start_idx + idx;
+            let Some(Some(sma_value)) = sma_values.get(global_idx) else {
+                continue;
+            };
+
+            let x_pos = (idx * spacing) + (spacing / 2);
+            let x = Self::clamp_x(inner, chart_width, x_pos);
+            let Some(y) = Self::map_price_to_y(inner, max_price, price_range, *sma_value) else {
+                continue;
+            };
+
+            if y >= inner.y && y < inner.y + inner.height {
+                let cell = &mut frame.buffer_mut()[(x, y)];
+                cell.set_char('•').set_fg(Color::Cyan);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_rsi_overlay(
+        &self,
+        frame: &mut Frame,
+        inner: Rect,
+        start_idx: usize,
+        candle_count: usize,
+        spacing: usize,
+        chart_width: usize,
+        rsi_values: &[Option<f64>],
+    ) {
+        let band_height = (inner.height / 4).max(2);
+        let band_top = inner.y + inner.height.saturating_sub(band_height);
+
+        for idx in 0..candle_count {
+            let global_idx = start_idx + idx;
+            let Some(Some(rsi_value)) = rsi_values.get(global_idx) else {
+                continue;
+            };
+
+            let rsi_clamped = rsi_value.clamp(0.0, 100.0);
+            let x_pos = (idx * spacing) + (spacing / 2);
+            let x = Self::clamp_x(inner, chart_width, x_pos);
+            let y_offset =
+                ((100.0 - rsi_clamped) / 100.0 * (band_height.saturating_sub(1)) as f64) as u16;
+            let max_band_y = band_top.saturating_add(band_height.saturating_sub(1));
+            let y = band_top.saturating_add(y_offset).min(max_band_y);
+
+            if y >= inner.y && y < inner.y + inner.height {
+                let cell = &mut frame.buffer_mut()[(x, y)];
+                cell.set_char('·').set_fg(Color::Magenta);
+            }
+        }
+    }
+
+    fn latest_indicator_values(&self) -> (Option<f64>, Option<f64>) {
+        let all_candles: Vec<Candle> = self.candles.iter().cloned().collect();
+        let sma = calculate_sma(&all_candles, 20);
+        let rsi = calculate_rsi(&all_candles, 14);
+
+        (sma.last().copied().flatten(), rsi.last().copied().flatten())
     }
 }
