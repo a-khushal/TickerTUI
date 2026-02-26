@@ -36,7 +36,12 @@ impl TradeTape {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let trades_vec: Vec<_> = self.trades.iter().rev().take(inner.height as usize).collect();
+        let trades_vec: Vec<_> = self
+            .trades
+            .iter()
+            .rev()
+            .take(inner.height as usize)
+            .collect();
         let items: Vec<ListItem> = trades_vec
             .iter()
             .enumerate()

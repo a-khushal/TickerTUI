@@ -1,22 +1,19 @@
 mod data;
 mod ui;
 
-use data::{fetch_klines, stream_klines};
-use data::orderbook::stream_orderbook;
-use data::trades::stream_trades;
-use ui::{Chart, LayoutManager, Timeframe};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    Terminal,
-};
+use data::orderbook::stream_orderbook;
+use data::trades::stream_trades;
+use data::{fetch_klines, stream_klines};
+use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use ui::{Chart, LayoutManager, Timeframe};
 
 struct AppState {
     chart: Arc<Mutex<Chart>>,
@@ -80,25 +77,27 @@ async fn main() -> io::Result<()> {
     let interval = timeframe.to_binance_interval().to_string();
     let limit = timeframe.limit();
 
-    let initial_candles = fetch_klines(&symbol, &interval, limit).await.unwrap_or_default();
-    
+    let initial_candles = fetch_klines(&symbol, &interval, limit)
+        .await
+        .unwrap_or_default();
+
     let chart = Arc::new(Mutex::new(Chart::new(symbol.clone(), interval.clone())));
     chart.lock().await.update_candles(initial_candles);
 
     let (restart_tx, mut restart_rx) = tokio::sync::mpsc::channel(10);
     let chart_clone = chart.clone();
     let layout_clone = Arc::new(Mutex::new(LayoutManager::new()));
-    
+
     let layout_for_orderbook = layout_clone.clone();
     let layout_for_trades = layout_clone.clone();
-    
+
     tokio::spawn(async move {
         let mut current_symbol = symbol.clone();
         let mut current_interval = interval.clone();
-        let mut rx = stream_klines(&current_symbol, &current_interval).await;
-        let mut orderbook_rx = stream_orderbook(&current_symbol).await;
-        let mut trades_rx = stream_trades(&current_symbol).await;
-        
+        let (mut rx, mut kline_handle) = stream_klines(&current_symbol, &current_interval);
+        let (mut orderbook_rx, mut orderbook_handle) = stream_orderbook(&current_symbol);
+        let (mut trades_rx, mut trades_handle) = stream_trades(&current_symbol);
+
         loop {
             tokio::select! {
                 candle_opt = rx.recv() => {
@@ -108,20 +107,32 @@ async fn main() -> io::Result<()> {
                             chart.add_candle(candle);
                         }
                     } else {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                        rx = stream_klines(&current_symbol, &current_interval).await;
+                        kline_handle.abort();
+                        let (new_rx, new_handle) = stream_klines(&current_symbol, &current_interval);
+                        rx = new_rx;
+                        kline_handle = new_handle;
                     }
                 }
                 orderbook_opt = orderbook_rx.recv() => {
                     if let Some(book) = orderbook_opt {
                         let mut layout = layout_for_orderbook.lock().await;
                         layout.orderbook.update(book);
+                    } else {
+                        orderbook_handle.abort();
+                        let (new_rx, new_handle) = stream_orderbook(&current_symbol);
+                        orderbook_rx = new_rx;
+                        orderbook_handle = new_handle;
                     }
                 }
                 trade_opt = trades_rx.recv() => {
                     if let Some(trade) = trade_opt {
                         let mut layout = layout_for_trades.lock().await;
                         layout.tradetape.add_trade(trade);
+                    } else {
+                        trades_handle.abort();
+                        let (new_rx, new_handle) = stream_trades(&current_symbol);
+                        trades_rx = new_rx;
+                        trades_handle = new_handle;
                     }
                 }
                 restart_opt = restart_rx.recv() => {
@@ -129,9 +140,21 @@ async fn main() -> io::Result<()> {
                         if new_symbol != current_symbol || new_interval != current_interval {
                             current_symbol = new_symbol;
                             current_interval = new_interval;
-                            rx = stream_klines(&current_symbol, &current_interval).await;
-                            orderbook_rx = stream_orderbook(&current_symbol).await;
-                            trades_rx = stream_trades(&current_symbol).await;
+
+                            kline_handle.abort();
+                            orderbook_handle.abort();
+                            trades_handle.abort();
+
+                            let (new_rx, new_kline_handle) = stream_klines(&current_symbol, &current_interval);
+                            let (new_orderbook_rx, new_orderbook_handle) = stream_orderbook(&current_symbol);
+                            let (new_trades_rx, new_trades_handle) = stream_trades(&current_symbol);
+
+                            rx = new_rx;
+                            orderbook_rx = new_orderbook_rx;
+                            trades_rx = new_trades_rx;
+                            kline_handle = new_kline_handle;
+                            orderbook_handle = new_orderbook_handle;
+                            trades_handle = new_trades_handle;
                         }
                     }
                 }
@@ -194,18 +217,10 @@ async fn main() -> io::Result<()> {
                             app.switch_timeframe(tf).await;
                         }
                         KeyCode::Left => {
-                            let mut layout = app.layout.lock().await;
-                            layout.timeframe.select_prev();
-                            let tf = layout.timeframe.current();
-                            drop(layout);
-                            app.switch_timeframe(tf).await;
+                            app.chart.lock().await.pan_left();
                         }
                         KeyCode::Right => {
-                            let mut layout = app.layout.lock().await;
-                            layout.timeframe.select_next();
-                            let tf = layout.timeframe.current();
-                            drop(layout);
-                            app.switch_timeframe(tf).await;
+                            app.chart.lock().await.pan_right();
                         }
                         KeyCode::Up => {
                             let mut layout = app.layout.lock().await;
@@ -252,11 +267,19 @@ fn render_help(frame: &mut ratatui::Frame) {
     };
 
     let help_text = vec![
-        Line::from(Span::styled("TickerTUI - Help", Style::default().fg(Color::Cyan).add_modifier(ratatui::style::Modifier::BOLD))),
+        Line::from(Span::styled(
+            "TickerTUI - Help",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Navigation:", Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Navigation:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::raw("  ↑/↓    "),
             Span::styled("Navigate watchlist", Style::default().fg(Color::White)),
@@ -270,37 +293,38 @@ fn render_help(frame: &mut ratatui::Frame) {
             Span::styled("Pan chart left/right", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Zoom:", Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Zoom:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::raw("  +/-    "),
             Span::styled("Zoom in/out", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
+        Line::from(vec![Span::styled(
+            "Timeframes:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )]),
         Line::from(vec![
-            Span::styled("Timeframes:", Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)),
+            Span::raw("  Tab    "),
+            Span::styled("Next timeframe", Style::default().fg(Color::White)),
         ]),
         Line::from(vec![
-            Span::raw("  1      "),
-            Span::styled("1 minute", Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::raw("  5      "),
-            Span::styled("5 minutes", Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::raw("  H      "),
-            Span::styled("1 hour", Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::raw("  D      "),
-            Span::styled("1 day", Style::default().fg(Color::White)),
+            Span::raw("  Shift+Tab"),
+            Span::styled("Previous timeframe", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Other:", Style::default().fg(Color::Yellow).add_modifier(ratatui::style::Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Other:",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )]),
         Line::from(vec![
             Span::raw("  ?/h    "),
             Span::styled("Toggle help", Style::default().fg(Color::White)),
@@ -315,10 +339,10 @@ fn render_help(frame: &mut ratatui::Frame) {
         .title("Help")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    
+
     let paragraph = Paragraph::new(help_text)
         .block(block)
         .alignment(Alignment::Left);
-    
+
     frame.render_widget(paragraph, frame.area());
 }

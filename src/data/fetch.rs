@@ -5,7 +5,7 @@ use serde_json::Value;
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Candle {
-    pub open_time: u64,     
+    pub open_time: u64,
     pub open: String,
     pub high: String,
     pub low: String,
@@ -19,7 +19,11 @@ pub struct Candle {
     pub ignore: String,
 }
 
-pub async fn fetch_klines(symbol: &str, interval: &str, limit: u32) -> Result<Vec<Candle>, reqwest::Error> {
+pub async fn fetch_klines(
+    symbol: &str,
+    interval: &str,
+    limit: u32,
+) -> Result<Vec<Candle>, reqwest::Error> {
     let client = Client::new();
     let url = "https://api.binance.com/api/v3/klines";
     let limit_str = limit.to_string();
@@ -34,7 +38,7 @@ pub async fn fetch_klines(symbol: &str, interval: &str, limit: u32) -> Result<Ve
         .await?
         .json::<Vec<Vec<Value>>>()
         .await?;
-    
+
     let candles: Vec<Candle> = res
         .into_iter()
         .map(|arr| Candle {
@@ -52,6 +56,6 @@ pub async fn fetch_klines(symbol: &str, interval: &str, limit: u32) -> Result<Ve
             ignore: arr[11].as_str().unwrap_or("0").to_string(),
         })
         .collect();
-    
+
     Ok(candles)
 }

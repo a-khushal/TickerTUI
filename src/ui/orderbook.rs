@@ -53,10 +53,7 @@ impl OrderBookPanel {
             self.render_side(&book.asks, asks_area, frame, true);
             self.render_side(&book.bids, bids_area, frame, false);
         } else {
-            let text = Line::from(Span::styled(
-                "Loading...",
-                Style::default().fg(Color::Gray),
-            ));
+            let text = Line::from(Span::styled("Loading...", Style::default().fg(Color::Gray)));
             let para = Paragraph::new(text).alignment(Alignment::Center);
             frame.render_widget(para, inner);
         }
@@ -71,19 +68,22 @@ impl OrderBookPanel {
     ) {
         let color = if is_asks { Color::Red } else { Color::Green };
 
-        let header = Line::from(vec![
-            Span::styled(
-                format!("{:>12} {:>12}", "Price", "Size"),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-        ]);
+        let header = Line::from(vec![Span::styled(
+            format!("{:>12} {:>12}", "Price", "Size"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]);
         let header_para = Paragraph::new(header);
-        frame.render_widget(header_para, Rect {
-            x: area.x,
-            y: area.y,
-            width: area.width,
-            height: 1,
-        });
+        frame.render_widget(
+            header_para,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: 1,
+            },
+        );
 
         let display_entries: Vec<_> = entries
             .iter()
@@ -101,12 +101,15 @@ impl OrderBookPanel {
                     Span::styled(qty_str, Style::default().fg(Color::White)),
                 ]);
                 let para = Paragraph::new(line);
-                frame.render_widget(para, Rect {
-                    x: area.x,
-                    y,
-                    width: area.width,
-                    height: 1,
-                });
+                frame.render_widget(
+                    para,
+                    Rect {
+                        x: area.x,
+                        y,
+                        width: area.width,
+                        height: 1,
+                    },
+                );
             }
         }
     }

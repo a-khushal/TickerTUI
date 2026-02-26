@@ -1,4 +1,4 @@
-use crate::ui::{Chart, OrderBookPanel, TradeTape, StatusBar, TimeframeSelector};
+use crate::ui::{Chart, OrderBookPanel, StatusBar, TimeframeSelector, TradeTape};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -34,12 +34,7 @@ impl LayoutManager {
         }
     }
 
-    pub fn render(
-        &mut self,
-        frame: &mut Frame,
-        chart: &Chart,
-        area: Rect,
-    ) {
+    pub fn render(&mut self, frame: &mut Frame, chart: &Chart, area: Rect) {
         let main_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -50,7 +45,7 @@ impl LayoutManager {
             .split(area);
 
         self.timeframe.render(frame, main_chunks[0]);
-        
+
         let content_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
@@ -62,10 +57,7 @@ impl LayoutManager {
 
         let right_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(50),
-                Constraint::Percentage(50),
-            ])
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(content_chunks[2]);
 
         self.render_watchlist(frame, content_chunks[0], chart);
@@ -96,7 +88,9 @@ impl LayoutManager {
                 let is_selected = idx == self.selected_symbol;
                 let is_current = symbol == &chart.symbol;
                 let style = if is_current {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else if is_selected {
                     Style::default().fg(Color::Yellow)
                 } else {
@@ -107,7 +101,9 @@ impl LayoutManager {
                 if is_current && !chart.candles.is_empty() {
                     if let Some(last) = chart.candles.back() {
                         if let Ok(close) = last.close.parse::<f64>() {
-                            let first_price = chart.candles.front()
+                            let first_price = chart
+                                .candles
+                                .front()
                                 .and_then(|c| c.close.parse::<f64>().ok())
                                 .unwrap_or(close);
                             let change = close - first_price;
@@ -122,10 +118,7 @@ impl LayoutManager {
                                 Color::Red
                             };
                             let line = Line::from(vec![
-                                Span::styled(
-                                    format!("{} {:.2} ", symbol, close),
-                                    style,
-                                ),
+                                Span::styled(format!("{} {:.2} ", symbol, close), style),
                                 Span::styled(
                                     format!("{:+.2}%", change_pct),
                                     Style::default().fg(change_color),

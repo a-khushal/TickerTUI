@@ -43,7 +43,8 @@ cargo run
 
 **Controls:**
 - `↑/↓` - Navigate watchlist
-- `←/→` or `Tab/Shift+Tab` - Switch timeframes
+- `←/→` - Pan chart left/right
+- `Tab/Shift+Tab` - Switch timeframes
 - `Enter` - Select symbol
 - `+/-` - Zoom in/out
 - `?` - Help

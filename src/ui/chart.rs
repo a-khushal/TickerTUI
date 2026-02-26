@@ -58,6 +58,15 @@ impl Chart {
         self.zoom = (self.zoom / 2).max(1);
     }
 
+    pub fn pan_left(&mut self) {
+        let max_offset = self.candles.len().saturating_sub(1);
+        self.offset = (self.offset + 1).min(max_offset);
+    }
+
+    pub fn pan_right(&mut self) {
+        self.offset = self.offset.saturating_sub(1);
+    }
+
     fn get_visible_count(&self, available_width: usize) -> usize {
         let min_candle_width = 2;
         let max_candles = available_width / min_candle_width;
@@ -100,9 +109,15 @@ impl Chart {
 
         let chart_width = area.width.saturating_sub(13) as usize;
         let chart_height = area.height.saturating_sub(2);
-        
+        if chart_width == 0 || chart_height == 0 {
+            return;
+        }
+
         let visible_count = self.get_visible_count(chart_width);
-        let start_idx = self.candles.len().saturating_sub(visible_count + self.offset);
+        let start_idx = self
+            .candles
+            .len()
+            .saturating_sub(visible_count + self.offset);
         let end_idx = self.candles.len().saturating_sub(self.offset);
         let visible_candles: Vec<&Candle> = self
             .candles
@@ -134,9 +149,7 @@ impl Chart {
 
         let (min_price, max_price) = parsed.iter().fold(
             (f64::MAX, f64::MIN),
-            |(min, max), (_open, high, low, _close, _vol)| {
-                (min.min(*low), max.max(*high))
-            },
+            |(min, max), (_open, high, low, _close, _vol)| (min.min(*low), max.max(*high)),
         );
 
         let price_range = (max_price - min_price).max(0.0001);
@@ -155,21 +168,17 @@ impl Chart {
             let x_pos = (idx * spacing) + (spacing / 2);
             let x = inner.x + x_pos.min(chart_width - 1) as u16;
 
-            let high_y = inner.y
-                + ((max_price - high) / price_range * (chart_height - 1) as f64) as u16;
-            let low_y = inner.y
-                + ((max_price - low) / price_range * (chart_height - 1) as f64) as u16;
-            let open_y = inner.y
-                + ((max_price - open) / price_range * (chart_height - 1) as f64) as u16;
-            let close_y = inner.y
-                + ((max_price - close) / price_range * (chart_height - 1) as f64) as u16;
+            let high_y =
+                inner.y + ((max_price - high) / price_range * (chart_height - 1) as f64) as u16;
+            let low_y =
+                inner.y + ((max_price - low) / price_range * (chart_height - 1) as f64) as u16;
+            let open_y =
+                inner.y + ((max_price - open) / price_range * (chart_height - 1) as f64) as u16;
+            let close_y =
+                inner.y + ((max_price - close) / price_range * (chart_height - 1) as f64) as u16;
 
             let is_bullish = close >= open;
-            let color = if is_bullish {
-                Color::Green
-            } else {
-                Color::Red
-            };
+            let color = if is_bullish { Color::Green } else { Color::Red };
 
             let body_top = open_y.min(close_y);
             let body_bottom = open_y.max(close_y);
@@ -195,7 +204,8 @@ impl Chart {
 
         let label_count = 5.min(chart_height as usize / 2);
         for i in 0..=label_count {
-            let y = inner.y + ((i as u16) * (chart_height.saturating_sub(1)) / label_count.max(1) as u16);
+            let y = inner.y
+                + ((i as u16) * (chart_height.saturating_sub(1)) / label_count.max(1) as u16);
             let price = max_price - (i as f64 / label_count.max(1) as f64) * price_range;
             let label = format!("{:>11.2}", price);
 
@@ -234,12 +244,15 @@ impl Chart {
         ]);
 
         let price_para = Paragraph::new(price_text);
-        frame.render_widget(price_para, Rect {
-            x: area.x + 13,
-            y: area.y + area.height - 1,
-            width: area.width.saturating_sub(13),
-            height: 1,
-        });
+        frame.render_widget(
+            price_para,
+            Rect {
+                x: area.x + 13,
+                y: area.y + area.height - 1,
+                width: area.width.saturating_sub(13),
+                height: 1,
+            },
+        );
     }
 
     fn render_volume(&self, frame: &mut Frame, area: Rect) {
@@ -248,8 +261,14 @@ impl Chart {
         }
 
         let chart_width = area.width.saturating_sub(13) as usize;
+        if chart_width == 0 {
+            return;
+        }
         let visible_count = self.get_visible_count(chart_width);
-        let start_idx = self.candles.len().saturating_sub(visible_count + self.offset);
+        let start_idx = self
+            .candles
+            .len()
+            .saturating_sub(visible_count + self.offset);
         let end_idx = self.candles.len().saturating_sub(self.offset);
         let visible_candles: Vec<&Candle> = self
             .candles
@@ -276,8 +295,10 @@ impl Chart {
             return;
         }
 
-        let chart_width = area.width.saturating_sub(13) as usize;
         let chart_height = area.height.saturating_sub(1);
+        if chart_height == 0 {
+            return;
+        }
         let spacing = chart_width / volumes.len().max(1);
 
         let inner = Rect {
@@ -291,7 +312,7 @@ impl Chart {
             let x_pos = (idx * spacing) + (spacing / 2);
             let x = inner.x + x_pos.min(chart_width - 1) as u16;
             let height = ((volume / max_volume) * chart_height as f64) as u16;
-            
+
             if height > 0 {
                 let start_y = inner.y + inner.height - height;
                 for y in start_y..inner.y + inner.height {
@@ -306,12 +327,15 @@ impl Chart {
         let volume_label = format!("Vol: {:.2}", max_volume);
         let label_text = Line::from(Span::styled(volume_label, Style::default().fg(Color::Gray)));
         let label_para = Paragraph::new(label_text);
-        frame.render_widget(label_para, Rect {
-            x: area.x,
-            y: area.y,
-            width: 12,
-            height: 1,
-        });
+        frame.render_widget(
+            label_para,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: 12,
+                height: 1,
+            },
+        );
     }
 
     fn render_stats(&self, frame: &mut Frame, area: Rect) {
@@ -327,7 +351,11 @@ impl Chart {
         let volume: f64 = latest.volume.parse().unwrap_or(0.0);
 
         let change = close - open;
-        let change_pct = if open > 0.0 { (change / open) * 100.0 } else { 0.0 };
+        let change_pct = if open > 0.0 {
+            (change / open) * 100.0
+        } else {
+            0.0
+        };
         let change_color = if change >= 0.0 {
             Color::Green
         } else {
@@ -351,7 +379,9 @@ impl Chart {
             Span::styled("Chg: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format!("{:+.2}%", change_pct),
-                Style::default().fg(change_color).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(change_color)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]);
 

@@ -1,4 +1,6 @@
+use futures_util::StreamExt;
 use serde_json::Value;
+use tokio::task::JoinHandle;
 
 #[derive(Debug, Clone)]
 pub struct OrderBookEntry {
@@ -17,10 +19,13 @@ pub struct OrderBook {
 #[allow(dead_code)]
 pub async fn fetch_orderbook(symbol: &str) -> Result<OrderBook, reqwest::Error> {
     let client = reqwest::Client::new();
-    let url = format!("https://api.binance.com/api/v3/depth?symbol={}&limit=20", symbol);
-    
+    let url = format!(
+        "https://api.binance.com/api/v3/depth?symbol={}&limit=20",
+        symbol
+    );
+
     let res = client.get(&url).send().await?.json::<Value>().await?;
-    
+
     let bids: Vec<OrderBookEntry> = res
         .get("bids")
         .and_then(|v| v.as_array())
@@ -34,7 +39,7 @@ pub async fn fetch_orderbook(symbol: &str) -> Result<OrderBook, reqwest::Error> 
             })
         })
         .collect();
-    
+
     let asks: Vec<OrderBookEntry> = res
         .get("asks")
         .and_then(|v| v.as_array())
@@ -48,7 +53,7 @@ pub async fn fetch_orderbook(symbol: &str) -> Result<OrderBook, reqwest::Error> 
             })
         })
         .collect();
-    
+
     Ok(OrderBook {
         bids,
         asks,
@@ -59,23 +64,28 @@ pub async fn fetch_orderbook(symbol: &str) -> Result<OrderBook, reqwest::Error> 
     })
 }
 
-pub async fn stream_orderbook(symbol: &str) -> tokio::sync::mpsc::Receiver<OrderBook> {
+pub fn stream_orderbook(symbol: &str) -> (tokio::sync::mpsc::Receiver<OrderBook>, JoinHandle<()>) {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
     let symbol_lower = symbol.to_lowercase();
-    let url = format!("wss://stream.binance.com:9443/ws/{}@depth20@100ms", symbol_lower);
-    
-    tokio::spawn(async move {
+    let url = format!(
+        "wss://stream.binance.com:9443/ws/{}@depth20@100ms",
+        symbol_lower
+    );
+
+    let handle = tokio::spawn(async move {
         loop {
             match tokio_tungstenite::connect_async(&url).await {
                 Ok((ws_stream, _)) => {
                     let (mut _write, mut read) = ws_stream.split();
-                    
+
                     while let Some(msg) = read.next().await {
                         match msg {
                             Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
                                 if let Ok(json) = serde_json::from_str::<Value>(&text) {
                                     if let Some(book) = parse_orderbook(&json) {
-                                        let _ = tx.send(book).await;
+                                        if tx.send(book).await.is_err() {
+                                            return;
+                                        }
                                     }
                                 }
                             }
@@ -91,8 +101,8 @@ pub async fn stream_orderbook(symbol: &str) -> tokio::sync::mpsc::Receiver<Order
             }
         }
     });
-    
-    rx
+
+    (rx, handle)
 }
 
 fn parse_orderbook(json: &Value) -> Option<OrderBook> {
@@ -108,7 +118,7 @@ fn parse_orderbook(json: &Value) -> Option<OrderBook> {
             })
         })
         .collect();
-    
+
     let asks: Vec<OrderBookEntry> = json
         .get("asks")?
         .as_array()?
@@ -121,7 +131,7 @@ fn parse_orderbook(json: &Value) -> Option<OrderBook> {
             })
         })
         .collect();
-    
+
     Some(OrderBook {
         bids,
         asks,
@@ -131,5 +141,3 @@ fn parse_orderbook(json: &Value) -> Option<OrderBook> {
             .as_secs(),
     })
 }
-
-use futures_util::StreamExt;
